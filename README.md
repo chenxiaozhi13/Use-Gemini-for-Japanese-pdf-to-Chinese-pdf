@@ -1,8 +1,4 @@
-好的，没有问题。
-
-这是根据您的最新要求更新的一份简洁、美观且清晰的英文 README.md。
-
-🤖 AI-Powered PDF Translator & Re-renderer
+AI-Powered PDF Translator & Re-renderer
 
 This project uses the Google Gemini API to automatically translate Japanese math exam PDFs—complete with their original images—into high-quality, layout-matched Chinese PDFs.
 
