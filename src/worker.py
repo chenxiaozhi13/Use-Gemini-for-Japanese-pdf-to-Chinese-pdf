@@ -6,25 +6,30 @@ import json
 import google.generativeai as genai
 from pdfminer.high_level import extract_pages
 from pdfminer.layout import LTTextContainer
+from reportlab.pdfgen import canvas
+from reportlab.pdfbase import ttfonts, pdfmetrics
 from . import config
 from . import task_manager
 
 def _parse_pdf_with_coordinates(pdf_path):
     """
-    Parses a PDF to extract text blocks with their coordinates using pdfminer.six.
+    Parses a PDF to extract text blocks and page dimensions using pdfminer.six.
 
     Args:
         pdf_path (str or Path): The path to the PDF file.
 
     Returns:
-        list: A list of dictionaries, where each dictionary represents a text block
-              and contains its page number, text content, and bounding box.
-              Example: [{'page': 0, 'text': 'Hello', 'coords': (x0, y0, x1, y1)}, ...]
+        tuple: A tuple containing:
+               - list: A list of text block dictionaries.
+               - list: A list of page dimension tuples (width, height).
+               Returns ([], []) on failure.
     """
     text_blocks = []
+    page_dimensions = []
     try:
         for page_layout in extract_pages(pdf_path):
-            page_index = page_layout.pageid - 1 # pdfminer pageid is 1-based
+            page_dimensions.append((page_layout.width, page_layout.height))
+            page_index = page_layout.pageid - 1  # pdfminer pageid is 1-based
             for element in page_layout:
                 if isinstance(element, LTTextContainer):
                     text = element.get_text().strip()
@@ -34,11 +39,11 @@ def _parse_pdf_with_coordinates(pdf_path):
                             'text': text,
                             'coords': element.bbox
                         })
-        logging.info(f"Successfully parsed {pdf_path} and found {len(text_blocks)} text blocks.")
+        logging.info(f"Successfully parsed {pdf_path} and found {len(text_blocks)} text blocks across {len(page_dimensions)} pages.")
     except Exception as e:
         logging.error(f"Failed to parse PDF {pdf_path} with pdfminer.six: {e}")
-        return [] # Return empty list to allow process to potentially continue
-    return text_blocks
+        return [], []  # Return empty lists to allow process to potentially continue
+    return text_blocks, page_dimensions
 
 def _get_translation_with_layout(structured_content, api_key):
     """
@@ -88,6 +93,68 @@ def _get_translation_with_layout(structured_content, api_key):
         # Re-raising is an option, but for now, we'll return None to signal failure
         return None
 
+def _rebuild_pdf_from_layout(translated_layout, page_dimensions, output_path):
+    """
+    Reconstructs a PDF from translated layout data using reportlab.
+
+    Args:
+        translated_layout (list): The list of translated text block dictionaries.
+        page_dimensions (list): A list of (width, height) tuples for each page.
+        output_path (Path): The path to save the newly generated PDF.
+
+    Returns:
+        bool: True on success, False on failure.
+    """
+    logging.info(f"Rebuilding PDF at {output_path}...")
+
+    # --- CRITICAL: Font Registration ---
+    # ReportLab needs a TrueType font file that supports CJK characters.
+    # The path below is a placeholder. A CJK font (e.g., Noto Sans CJK SC,
+    # WenQuanYi, SimSun) MUST be available at this path in the execution
+    # environment for the PDF to render correctly.
+    cjk_font_path = '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc'
+    font_name = 'CJK-Regular'
+
+    try:
+        pdfmetrics.registerFont(ttfonts.TTFont(font_name, cjk_font_path))
+    except Exception as e:
+        logging.error(f"CRITICAL: Could not register CJK font from '{cjk_font_path}'. Error: {e}")
+        logging.error("Cannot proceed without a CJK font. Please install a suitable font and update the path in `_rebuild_pdf_from_layout`.")
+        return False
+
+    # Group text blocks by page number for easier processing
+    blocks_by_page = {}
+    for block in translated_layout:
+        page_num = block['page']
+        if page_num not in blocks_by_page:
+            blocks_by_page[page_num] = []
+        blocks_by_page[page_num].append(block)
+
+    try:
+        c = canvas.Canvas(str(output_path))
+        for i, (width, height) in enumerate(page_dimensions):
+            c.setPageSize((width, height))
+
+            if i in blocks_by_page:
+                for block in blocks_by_page[i]:
+                    x0, y0, x1, y1 = block['coords']
+                    text = block['text']
+
+                    # Estimate font size based on bounding box height
+                    font_size = y1 - y0
+
+                    c.setFont(font_name, font_size)
+                    c.drawString(x0, y0, text)
+
+            c.showPage() # Finalize the current page and move to the next
+
+        c.save()
+        logging.success(f"Successfully rebuilt PDF: {output_path}")
+        return True
+    except Exception as e:
+        logging.error(f"An error occurred during PDF reconstruction with reportlab: {e}")
+        return False
+
 def process_task(task_info, api_key):
     """
     Processes a single task, from calling the AI to compiling the LaTeX document.
@@ -129,7 +196,7 @@ def process_task(task_info, api_key):
 
     # --- 1. Parse PDF for text and coordinates ---
     logging.info(f"{log_prefix} Parsing PDF for text and coordinates...")
-    structured_content = _parse_pdf_with_coordinates(source_pdf_path)
+    structured_content, page_dimensions = _parse_pdf_with_coordinates(source_pdf_path)
     if not structured_content:
         logging.warning(f"{log_prefix} PDF parsing yielded no text blocks. The PDF might be image-based or empty. Task will be marked as successful.")
         return True # Nothing to translate, so we consider it a success.
@@ -141,16 +208,14 @@ def process_task(task_info, api_key):
         logging.error(f"{log_prefix} Layout-aware translation failed.")
         return False # Signal a controllable failure to the scheduler
 
-    # --- 3. Log results ---
-    logging.success(f"{log_prefix} Successfully received translated layout data.")
-    logging.info(f"{log_prefix} Translated {len(translated_content)} text blocks. First block: {translated_content[0] if translated_content else 'N/A'}")
+    # --- 3. Rebuild PDF from translated layout ---
+    output_pdf_path = task_output_dir / f"{task_id}_translated.pdf"
 
-    # For now, the task is complete after successful translation and logging.
-    # The LaTeX generation will be a separate step.
-    # We can save the translated content to a file for inspection.
-    translated_json_path = task_output_dir / "translated_layout.json"
-    with open(translated_json_path, 'w', encoding='utf-8') as f:
-        json.dump(translated_content, f, ensure_ascii=False, indent=2)
-    logging.info(f"{log_prefix} Translated data saved to {translated_json_path}")
+    rebuild_success = _rebuild_pdf_from_layout(
+        translated_layout=translated_content,
+        page_dimensions=page_dimensions,
+        output_path=output_pdf_path
+    )
 
-    return True
+    # The success of the entire task now depends on the PDF reconstruction
+    return rebuild_success
