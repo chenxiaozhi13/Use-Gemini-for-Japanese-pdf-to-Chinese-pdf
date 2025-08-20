@@ -3,8 +3,41 @@ import shutil
 import subprocess
 import os
 import google.generativeai as genai
+from pdfminer.high_level import extract_pages
+from pdfminer.layout import LTTextContainer
 from . import config
 from . import task_manager
+
+def _parse_pdf_with_coordinates(pdf_path):
+    """
+    Parses a PDF to extract text blocks with their coordinates using pdfminer.six.
+
+    Args:
+        pdf_path (str or Path): The path to the PDF file.
+
+    Returns:
+        list: A list of dictionaries, where each dictionary represents a text block
+              and contains its page number, text content, and bounding box.
+              Example: [{'page': 0, 'text': 'Hello', 'coords': (x0, y0, x1, y1)}, ...]
+    """
+    text_blocks = []
+    try:
+        for page_layout in extract_pages(pdf_path):
+            page_index = page_layout.pageid - 1 # pdfminer pageid is 1-based
+            for element in page_layout:
+                if isinstance(element, LTTextContainer):
+                    text = element.get_text().strip()
+                    if text:  # Only add non-empty text blocks
+                        text_blocks.append({
+                            'page': page_index,
+                            'text': text,
+                            'coords': element.bbox
+                        })
+        logging.info(f"Successfully parsed {pdf_path} and found {len(text_blocks)} text blocks.")
+    except Exception as e:
+        logging.error(f"Failed to parse PDF {pdf_path} with pdfminer.six: {e}")
+        return [] # Return empty list to allow process to potentially continue
+    return text_blocks
 
 def process_task(task_info, api_key):
     """
@@ -45,8 +78,16 @@ def process_task(task_info, api_key):
         logging.warning(f"{log_prefix} Source PDF not found at {source_pdf_path}. Skipping task.")
         return True # Consider it "successful" as there is no work to be done.
 
+    # --- 1. Parse PDF for text and coordinates ---
+    logging.info(f"{log_prefix} Parsing PDF for text and coordinates...")
+    structured_content = _parse_pdf_with_coordinates(source_pdf_path)
+    if not structured_content:
+        logging.warning(f"{log_prefix} PDF parsing yielded no text blocks. The PDF might be image-based or empty. Proceeding without structured data.")
+    else:
+        logging.info(f"{log_prefix} Successfully extracted {len(structured_content)} text blocks. First block: {structured_content[0]}")
+
     try:
-        # --- 1. Construct the prompt for the API call ---
+        # --- 2. Construct the prompt for the API call ---
         prompt_parts = [config.ai_prompt]
         prompt_parts.append(genai.upload_file(path=source_pdf_path))
 
@@ -59,9 +100,9 @@ def process_task(task_info, api_key):
                 for image_path in image_files:
                     prompt_parts.append(genai.upload_file(path=image_path))
 
-        # --- 2. Call the Generative AI Model ---
-        logging.info(f"{log_prefix} Calling Gemini API...")
-        model = genai.GenerativeModel(model_name="gemini-1.5-pro-latest")
+        # --- 3. Call the Generative AI Model ---
+        logging.info(f"{log_prefix} Calling Gemini API with model gemini-2.5-pro...")
+        model = genai.GenerativeModel(model_name="gemini-2.5-pro")
         response = model.generate_content(prompt_parts, request_options={"timeout": 600})
 
         # Clean up the response text
@@ -73,7 +114,7 @@ def process_task(task_info, api_key):
 
         final_latex_code = config.LATEX_PREAMBLE + "\n" + raw_text
 
-        # --- 3. Save LaTeX code and copy assets ---
+        # --- 4. Save LaTeX code and copy assets ---
         output_tex_path = task_output_dir / "generated.tex"
         with open(output_tex_path, "w", encoding="utf-8") as f:
             f.write(final_latex_code)
@@ -86,7 +127,7 @@ def process_task(task_info, api_key):
                 shutil.rmtree(target_image_dir)
             shutil.copytree(source_image_dir, target_image_dir)
 
-        # --- 4. Compile LaTeX to PDF ---
+        # --- 5. Compile LaTeX to PDF ---
         logging.info(f"{log_prefix} Starting PDF rendering with XeLaTeX...")
         for i in range(2): # Run twice for references
             process = subprocess.run(
@@ -101,7 +142,7 @@ def process_task(task_info, api_key):
                 logging.warning(f"{log_prefix} XeLaTeX compilation failed on run {i+1}. Check log: {output_tex_path.with_suffix('.log')}")
                 return False # Controllable failure
 
-        # --- 5. Final Verification and Success Marking ---
+        # --- 6. Final Verification and Success Marking ---
         if output_tex_path.with_suffix('.pdf').exists():
             # The "ultimate success marker": copy the original PDF to the output dir
             shutil.copy(source_pdf_path, task_output_dir)

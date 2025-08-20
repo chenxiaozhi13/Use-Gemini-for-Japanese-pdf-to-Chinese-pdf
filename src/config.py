@@ -2,10 +2,18 @@ import os
 from pathlib import Path
 
 # --- API Keys Configuration ---
-# It is recommended to load keys from environment variables or a secure vault in production.
-API_KEYS = [
-    'AIzaSyDcdby4fSAJdtuC7H7N-1n4EXh__ZJ9Hu'
-]
+# To enhance security, API keys are loaded from a `GOOGLE_API_KEYS` environment
+# variable. The variable should contain a comma-separated list of your API keys.
+# e.g., export GOOGLE_API_KEYS="key1,key2,key3"
+
+api_keys_str = os.environ.get('GOOGLE_API_KEYS')
+if not api_keys_str:
+    raise ValueError("The GOOGLE_API_KEYS environment variable is not set. Please set it to a comma-separated list of your API keys.")
+
+API_KEYS = [key.strip() for key in api_keys_str.split(',')]
+
+if not API_KEYS or not all(API_KEYS):
+    raise ValueError("The GOOGLE_API_KEYS environment variable is set, but it appears to be empty or contain empty values. Please check its content.")
 
 # --- Path Configuration ---
 # Defines the directory structure for input and output files.
