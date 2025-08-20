@@ -1,116 +1,139 @@
-AI-Powered PDF Translator & Re-renderer
+# AI-Powered Academic Document Localization Platform
 
-This project uses the Google Gemini API to automatically translate Japanese math exam PDFs—complete with their original images—into high-quality, layout-matched Chinese PDFs.
+## 1. Project Vision
 
-✨ Core Features
+**AI驱动的学术文档智能本地化平台**
 
-🚀 High-Concurrency Engine: Processes dozens of files simultaneously by leveraging Python's multiprocessing capabilities, maximizing speed and efficiency.
-
-🔑 Multi-API Key Strategy: The system rotates through a pool of API keys. This provides two major advantages:
-
-Fault Tolerance: If one key is rate-limited, blocked, or fails, the system automatically switches to healthy keys, ensuring the process continues without interruption.
-
-Increased Throughput: It allows us to bypass the rate limit of a single key, enabling a much higher number of parallel tasks.
-
-🧠 Dynamic Load Balancing (No More Bottlenecks!): This is our secret sauce for preventing process pile-ups. The system doesn't assign tasks randomly; it uses a dynamic scoring algorithm:
-
-It constantly calculates a "busyness score" for each API key.
-
-This score considers active load (current running jobs), long-term pressure (queued tasks), and failure history.
-
-New tasks are always assigned to the key with the lowest score. This ensures work is distributed intelligently and prevents tasks from getting stuck behind a slow or failing process.
-
-🛠️ Self-Healing Workflow: If a task fails, it's automatically retried. If an API key is consistently causing problems, the system sidelines it. Just run the script once, and it will work tirelessly to complete the job.
-
-⚙️ How It Works
-
-The process is fully automated and image-aware:
-
-Japanese PDF ➡️ minerU Extracts Images ➡️ (PDF Text + All Images) ➡️ Gemini API (Performs OCR, Translation, and LaTeX Layout) ➡️ Final, High-Fidelity Chinese PDF
-
-This workflow ensures that questions with diagrams, graphs, and figures are perfectly understood and reproduced in the final document.
-
-⚠️ Journey & Key Learnings (Notes & Considerations)
-
-Problem: System crashes on startup due to resource overload.
-
-Solution: We implemented a "smooth startup" that gradually launches processes, preventing system instability.
-
-Problem: Simple task distribution was slow and created bottlenecks.
-
-Solution: Our dynamic scoring and load-balancing algorithm ensures that the workload is always spread efficiently across all available resources.
-
-Problem: Failed tasks were sometimes skipped permanently.
-
-Solution: We designed a more robust "success check" that is virtually bug-proof, ensuring every task is either completed or correctly marked for retry.
-
-❗️Crucial System Note: This script is powerful but resource-intensive. On Windows, each process can require about 1GB of virtual memory (Page File). Ensure your system's page file is adequately sized to avoid crashes.
-
-🛠️ Tools & Technologies Used
-
-Python 3
-
-Google Gemini 2.5 Pro API KEY (more than one)
-
-minerU (For PDF image extraction)
-
-LaTeX (XeLaTeX for CJK font support)
-
-Python's multiprocessing library
+This project provides a robust, scalable web service for translating academic documents (such as mathematical exams) from one language to another while meticulously preserving the original page layout and formatting. It leverages a powerful AI model for translation and a sophisticated PDF reconstruction engine to deliver high-fidelity, production-quality results.
 
 ---
 
-## Service-Based Architecture (NEW)
+## 2. Architecture Overview
 
-The application has been refactored into a modern, scalable web service with three main components:
-1.  **FastAPI Web Server**: Handles HTTP requests, file uploads, and queuing tasks.
-2.  **Celery Worker**: Executes the long-running PDF processing tasks in the background.
-3.  **Redis Broker**: A message broker that manages the queue of tasks between the web server and the workers.
+The system is designed as a modern, asynchronous web service to handle long-running, computationally intensive tasks efficiently.
 
-### Prerequisites (Service Mode)
+- **API Layer (FastAPI)**: A high-performance Python web framework that provides the HTTP interface. It handles file uploads and dispatches tasks to the background processing system.
+- **Task Queue (Celery & Redis)**: Celery is a distributed task queue that allows us to execute the PDF processing asynchronously. This ensures the API remains responsive and doesn't block while waiting for a task to complete. Redis serves as the fast, in-memory message broker that mediates between the web server and the Celery workers.
+- **Backend Orchestrator (`src` module)**: The core logic of the application lives in the `src` package. It contains a multi-process, multi-threaded engine responsible for the entire PDF processing pipeline:
+    1.  **Parsing (`pdfminer.six`)**: Extracts text content and its precise coordinates from the source PDF.
+    2.  **Concurrent Translation (Gemini API)**: Translates the text from each page of the document concurrently, maximizing speed.
+    3.  **PDF Reconstruction (`reportlab`)**: Rebuilds a new PDF from scratch, placing the translated text at its original coordinates to ensure the layout is perfectly preserved.
+
+---
+
+## 3. API Endpoints Documentation
+
+### 3.1. Upload a PDF for Translation
+
+- **Method**: `POST`
+- **Path**: `/upload`
+- **Description**: Submits a new PDF file for translation. The service accepts the file, queues it for background processing, and immediately returns a unique `task_id`.
+- **`curl` Example**:
+  ```bash
+  curl -X POST "http://127.0.0.1:8000/upload" \
+       -H "accept: application/json" \
+       -H "Content-Type: multipart/form-data" \
+       -F "file=@/path/to/your/document.pdf"
+  ```
+- **Success Response (202 Accepted)**:
+  ```json
+  {
+    "task_id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+    "filename": "document.pdf",
+    "status": "queued",
+    "detail": "The file has been successfully queued for processing."
+  }
+  ```
+
+### 3.2. Check Task Status
+
+- **Method**: `GET`
+- **Path**: `/status/{task_id}`
+- **Description**: Poll this endpoint with a `task_id` to check the current status of a processing job.
+- **`curl` Example**:
+  ```bash
+  curl -X GET "http://127.0.0.1:8000/status/a1b2c3d4-e5f6-7890-1234-567890abcdef"
+  ```
+- **Response Examples**:
+    - **Pending**:
+      ```json
+      {
+        "task_id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+        "status": "PENDING",
+        "result": null
+      }
+      ```
+    - **Success**:
+      ```json
+      {
+        "task_id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+        "status": "SUCCESS",
+        "result": "/app/temp_uploads/document_translated.pdf"
+      }
+      ```
+    - **Failure**:
+      ```json
+      {
+        "task_id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+        "status": "FAILURE",
+        "result": "PDF processing failed. Check worker logs for details."
+      }
+      ```
+
+### 3.3. Download Processed File
+
+- **Method**: `GET`
+- **Path**: `/download/{task_id}`
+- **Description**: Once a task's status is `SUCCESS`, use this endpoint to download the final, translated PDF file.
+- **`curl` Example**:
+  ```bash
+  curl -X GET "http://127.0.0.1:8000/download/a1b2c3d4-e5f6-7890-1234-567890abcdef" \
+       --output translated_document.pdf
+  ```
+- **Success Response**: The endpoint returns the PDF file directly with a `Content-Type: application/pdf` header.
+- **Error Response**: If the task is not yet complete or has failed, it will return a 404 Not Found error.
+
+---
+
+## 4. Setup and Deployment Guide
+
+### 4.1. Prerequisites
 
 - Python 3.10+
 - [Redis](https://redis.io/docs/getting-started/): You must have a Redis server running locally.
-- **A CJK Font**: The PDF reconstruction requires a TrueType Font that supports Chinese characters (e.g., Noto Sans CJK, WenQuanYi, SimSun). The application is configured to look for a font at `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`. Please ensure a font exists at this path or update the path in `src/worker.py`.
+- **A CJK Font**: The PDF reconstruction requires a TrueType Font that supports Chinese characters (e.g., Noto Sans CJK, WenQuanYi, SimSun). The application is configured to look for a font at a standard Linux path. Please ensure a suitable font is installed or update the path in `src/worker.py`.
 
-### Installation
+### 4.2. Installation
 
-1.  Clone the repository.
-2.  Install the Python dependencies:
+1.  Clone this repository.
+2.  Install the required Python dependencies:
     ```bash
     pip install -r requirements.txt
     ```
 
-### Running the Application (Service Mode)
+### 4.3. Running the Application
 
-You need to run three separate processes in three different terminals.
+You need to run **three separate processes** in three different terminals for the service to be fully operational.
 
-**1. Start Redis**
+**Terminal 1: Start Redis**
 
-If you have Redis installed via a package manager, you can usually start it with:
+If you have Redis installed via a package manager (like `apt` or `brew`), you can usually start it with:
 ```bash
 redis-server
 ```
 Ensure Redis is running on its default port (6379).
 
-**2. Start the Celery Worker**
+**Terminal 2: Start the Celery Worker**
 
-In a new terminal, navigate to the project root and run the following command to start the Celery worker process. The worker will listen for tasks on the Redis queue.
+Navigate to the project root and run the following command to start the Celery worker. The worker will connect to Redis and wait for tasks to process.
 ```bash
 celery -A tasks.celery_app worker --loglevel=info
 ```
 
-**3. Start the FastAPI Server**
+**Terminal 3: Start the FastAPI Server**
 
-In a third terminal, navigate to the project root and run the following command to start the FastAPI web server using Uvicorn.
+Navigate to the project root and run the following command to start the FastAPI web server.
 ```bash
 uvicorn main:app --reload
 ```
-
-The API will be available at `http://127.0.0.1:8000`.
-
-### How to Use the API
-
-1.  Navigate to the interactive API documentation at `http://127.0.0.1:8000/docs`.
-2.  Use the `/upload` endpoint to upload a PDF file.
-3.  The API will return a `task_id`. This confirms that your task has been queued for processing by the Celery worker.
+The API will now be live and accessible at `http://127.0.0.1:8000`. You can access the interactive documentation at `http://127.0.0.1:8000/docs`.
