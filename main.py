@@ -3,6 +3,7 @@ import shutil
 import logging
 from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, HTTPException
+from tasks import process_pdf_task
 
 # --- App Initialization ---
 app = FastAPI(
@@ -65,13 +66,17 @@ async def upload_pdf(file: UploadFile = File(...)):
         # Always close the uploaded file
         file.file.close()
 
-    # For now, we just return a confirmation.
-    # In the next step, this is where we would trigger the background processing.
+    # --- Trigger Background Task ---
+    # Instead of processing here, we queue the task with Celery.
+    # We pass the absolute path of the saved file to the task.
+    task = process_pdf_task.delay(str(file_path.resolve()))
+
+    # Return the Celery task ID to the client
     return {
-        "task_id": task_id,
+        "task_id": task.id,
         "filename": file.filename,
-        "status": "received_for_processing",
-        "detail": "The file has been received and is waiting to be processed.",
+        "status": "queued",
+        "detail": "The file has been successfully queued for processing.",
     }
 
 # To run this application:

@@ -175,24 +175,25 @@ def _rebuild_pdf_from_layout(translated_layout, page_dimensions, output_path):
         logging.error(f"An error occurred during PDF reconstruction with reportlab: {e}")
         return False
 
-def process_task(task_info, api_key):
+def process_task(source_pdf_path, api_key):
     """
-    Processes a single task, from calling the AI to compiling the LaTeX document.
+    Processes a single PDF file task.
 
-    This function encapsulates the core logic for handling one PDF task. It configures the API,
-    constructs the prompt, calls the generative model, saves the result, and compiles the PDF.
+    This function encapsulates the core logic for handling one PDF task. It parses the file,
+    sends the content for translation, and rebuilds the translated PDF.
 
     Args:
-        task_info (tuple): A tuple containing task details (year, exam_type, q_num, doc_type).
+        source_pdf_path (str): The absolute path to the source PDF file.
         api_key (str): The Google AI API key to use for this task.
 
     Returns:
-        bool: True on success, False on a controllable failure (like a LaTeX compile error).
+        bool: True on success, False on a controllable failure.
 
     Raises:
         Exception: For critical, non-retriable errors (e.g., API failures).
     """
-    task_id = task_manager.get_task_id(task_info)
+    source_pdf_path = Path(source_pdf_path)
+    task_id = source_pdf_path.stem
     pid = os.getpid()
     log_prefix = f"[{task_id}][PID {pid}]"
 
@@ -204,10 +205,6 @@ def process_task(task_info, api_key):
     # Define paths
     task_output_dir = config.FINAL_OUTPUT_DIR / task_id
     task_output_dir.mkdir(exist_ok=True, parents=True)
-
-    source_pdf_path = config.BASE_DIR / f"{task_id}.pdf"
-    source_folder_path = config.BASE_DIR / task_id
-    source_image_dir = source_folder_path / "images"
 
     # If the source PDF doesn't exist, there's nothing to process.
     if not source_pdf_path.exists():

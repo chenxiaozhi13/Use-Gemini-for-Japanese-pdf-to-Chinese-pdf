@@ -37,7 +37,7 @@ def get_least_busy_key(api_key_status):
 
     return best_key
 
-def _process_wrapper(task_info, api_key, results_queue):
+def _process_wrapper(file_path, api_key, results_queue):
     """
     A wrapper function to run the worker process and report results.
     This function is the target for each multiprocessing.Process. It ensures
@@ -45,22 +45,22 @@ def _process_wrapper(task_info, api_key, results_queue):
     is caught and put into the shared results queue.
     """
     try:
-        success = worker.process_task(task_info, api_key)
+        success = worker.process_task(file_path, api_key)
         # 'success' can be True or False (for controllable failures)
-        results_queue.put({'task': task_info, 'key': api_key, 'status': success})
+        results_queue.put({'task': file_path, 'key': api_key, 'status': success})
     except Exception as e:
         # A critical, unexpected error occurred in the worker
-        results_queue.put({'task': task_info, 'key': api_key, 'status': 'CRITICAL_FAILURE', 'error': str(e)})
+        results_queue.put({'task': file_path, 'key': api_key, 'status': 'CRITICAL_FAILURE', 'error': str(e)})
 
-def run_scheduler(tasks_to_run):
+def run_orchestration(tasks_to_process: list[str]):
     """
-    The main scheduler loop to manage and distribute tasks to worker processes.
+    The main orchestration loop to manage and distribute file-based tasks to worker processes.
     """
-    logging.info(f"Scheduler starting with {len(tasks_to_run)} tasks to process.")
+    logging.info(f"Orchestrator starting with {len(tasks_to_process)} tasks to process.")
 
     # --- Initialization ---
     api_key_status = {key: {'active': 0, 'failures': 0} for key in config.API_KEYS}
-    tasks_queue = collections.deque(tasks_to_run)
+    tasks_queue = collections.deque(tasks_to_process)
 
     manager = multiprocessing.Manager()
     results_queue = manager.Queue()
@@ -94,16 +94,16 @@ def run_scheduler(tasks_to_run):
 
             # Log outcome and update failure counts
             if result['status'] == True:
-                logging.success(f"Task {task_manager.get_task_id(task_info)} completed successfully.")
-                successful_tasks.append(task_info)
+                logging.success(f"Task {result['task']} completed successfully.")
+                successful_tasks.append(result['task'])
             elif result['status'] == False:
-                logging.warning(f"Task {task_manager.get_task_id(task_info)} failed with a controllable error.")
+                logging.warning(f"Task {result['task']} failed with a controllable error.")
                 api_key_status[key]['failures'] += 1
-                failed_tasks.append(task_info)
+                failed_tasks.append(result['task'])
             else: # CRITICAL_FAILURE
-                logging.error(f"Task {task_manager.get_task_id(task_info)} failed with a critical error: {result['error']}")
+                logging.error(f"Task {result['task']} failed with a critical error: {result['error']}")
                 api_key_status[key]['failures'] += 1 # Penalize heavily
-                failed_tasks.append(task_info)
+                failed_tasks.append(result['task'])
 
         # --- 2. Launch new workers if there are free slots ---
         can_launch = len(active_processes) < config.TARGET_TOTAL_CONCURRENCY and tasks_queue
@@ -111,24 +111,23 @@ def run_scheduler(tasks_to_run):
             best_key = get_least_busy_key(api_key_status)
 
             if best_key:
-                task_to_run = tasks_queue.popleft()
+                task_path = tasks_queue.popleft()
 
                 p = multiprocessing.Process(
                     target=_process_wrapper,
-                    args=(task_to_run, best_key, results_queue)
+                    args=(task_path, best_key, results_queue)
                 )
 
                 active_processes.append({
                     'process': p,
-                    'task': task_to_run,
+                    'task': task_path,
                     'key': best_key
                 })
                 api_key_status[best_key]['active'] += 1
 
                 p.start()
 
-                task_id = task_manager.get_task_id(task_to_run)
-                logging.info(f"Launched task {task_id} with key ...{best_key[-4:]}")
+                logging.info(f"Launched task for {task_path} with key ...{best_key[-4:]}")
 
                 # Smooth start mechanism
                 time.sleep(config.PROCESS_START_DELAY)
@@ -143,6 +142,6 @@ def run_scheduler(tasks_to_run):
     logging.error(f"Total failed tasks: {len(failed_tasks)}")
     if failed_tasks:
         logging.info("Failed task list:")
-        for task_info in failed_tasks:
-            logging.info(f"  - {task_manager.get_task_id(task_info)}")
+        for task_path in failed_tasks:
+            logging.info(f"  - {task_path}")
     logging.info("-" * 50)

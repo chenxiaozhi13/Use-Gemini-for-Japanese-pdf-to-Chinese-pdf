@@ -4,3 +4,5 @@ pdfminer.six
 reportlab
 fastapi
 uvicorn
+celery
+redis
