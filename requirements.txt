@@ -1,3 +1,4 @@
 pytest
 google-generativeai
 pdfminer.six
+reportlab
