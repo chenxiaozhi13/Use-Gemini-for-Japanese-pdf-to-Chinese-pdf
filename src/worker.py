@@ -3,6 +3,8 @@ import shutil
 import subprocess
 import os
 import json
+import collections
+import concurrent.futures
 import google.generativeai as genai
 from pdfminer.high_level import extract_pages
 from pdfminer.layout import LTTextContainer
@@ -45,13 +47,36 @@ def _parse_pdf_with_coordinates(pdf_path):
         return [], []  # Return empty lists to allow process to potentially continue
     return text_blocks, page_dimensions
 
+def _translate_page_chunk(page_data, api_key):
+    """Translates a single page's worth of text blocks."""
+    try:
+        # Configure the generative AI library for this thread
+        genai.configure(api_key=api_key)
+
+        json_input = json.dumps(page_data, indent=2)
+        prompt = config.LAYOUT_AWARE_TRANSLATE_PROMPT + "\n\n" + json_input
+
+        model = genai.GenerativeModel(model_name="gemini-2.5-pro")
+        response = model.generate_content(prompt, request_options={"timeout": 900})
+
+        raw_text = response.text.strip()
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[len("```json"):].strip()
+        if raw_text.endswith("```"):
+            raw_text = raw_text[:-len("```")].strip()
+
+        return json.loads(raw_text)
+    except Exception as e:
+        logging.error(f"Error translating page chunk: {e}")
+        return None # Signal failure for this chunk
+
 def _get_translation_with_layout(structured_content, api_key):
     """
-    Sends structured text content to the Gemini API for translation.
+    Sends structured text content to the Gemini API for translation concurrently by page.
 
     Args:
         structured_content (list): A list of dictionaries from _parse_pdf_with_coordinates.
-        api_key (str): The API key to use for this call.
+        api_key (str): The API key to use for all concurrent calls.
 
     Returns:
         list or None: A list of dictionaries with translated text, or None on failure.
@@ -59,39 +84,34 @@ def _get_translation_with_layout(structured_content, api_key):
     if not structured_content:
         return []
 
-    logging.info(f"Sending {len(structured_content)} text blocks for layout-aware translation.")
+    # Group data by page
+    blocks_by_page = collections.defaultdict(list)
+    for block in structured_content:
+        blocks_by_page[block['page']].append(block)
 
-    # Configure the API for this specific call
-    genai.configure(api_key=api_key)
+    logging.info(f"Submitting {len(blocks_by_page)} pages for concurrent translation.")
 
-    try:
-        json_input = json.dumps(structured_content, indent=2)
+    all_translated_blocks = []
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        # Submit a translation task for each page
+        future_to_page = {executor.submit(_translate_page_chunk, page_data, api_key): page
+                          for page, page_data in blocks_by_page.items()}
 
-        # The prompt is a combination of the system prompt and the data
-        prompt = config.LAYOUT_AWARE_TRANSLATE_PROMPT + "\n\n" + json_input
+        for future in concurrent.futures.as_completed(future_to_page):
+            page_num = future_to_page[future]
+            try:
+                translated_page_blocks = future.result()
+                if translated_page_blocks is None:
+                    logging.error(f"Translation failed for page {page_num}. Aborting document.")
+                    return None # A single page failure fails the whole document
+                all_translated_blocks.extend(translated_page_blocks)
+            except Exception as exc:
+                logging.error(f"Page {page_num} generated an exception: {exc}")
+                return None # Exception also fails the whole document
 
-        model = genai.GenerativeModel(model_name="gemini-2.5-pro")
-        response = model.generate_content(prompt, request_options={"timeout": 900})
-
-        # Clean the response from the model
-        raw_text = response.text.strip()
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[len("```json"):].strip()
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-len("```")].strip()
-
-        # Parse the JSON response
-        translated_content = json.loads(raw_text)
-        return translated_content
-
-    except json.JSONDecodeError as e:
-        logging.error(f"Failed to decode JSON response from API: {e}")
-        logging.debug(f"Raw response was: {raw_text}")
-        return None
-    except Exception as e:
-        logging.error(f"An unexpected error occurred during translation API call: {e}")
-        # Re-raising is an option, but for now, we'll return None to signal failure
-        return None
+    # Sort all blocks by page number to ensure original order
+    all_translated_blocks.sort(key=lambda x: x['page'])
+    return all_translated_blocks
 
 def _rebuild_pdf_from_layout(translated_layout, page_dimensions, output_path):
     """
