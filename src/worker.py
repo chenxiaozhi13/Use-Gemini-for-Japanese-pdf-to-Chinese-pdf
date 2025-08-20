@@ -2,6 +2,7 @@ import logging
 import shutil
 import subprocess
 import os
+import json
 import google.generativeai as genai
 from pdfminer.high_level import extract_pages
 from pdfminer.layout import LTTextContainer
@@ -38,6 +39,54 @@ def _parse_pdf_with_coordinates(pdf_path):
         logging.error(f"Failed to parse PDF {pdf_path} with pdfminer.six: {e}")
         return [] # Return empty list to allow process to potentially continue
     return text_blocks
+
+def _get_translation_with_layout(structured_content, api_key):
+    """
+    Sends structured text content to the Gemini API for translation.
+
+    Args:
+        structured_content (list): A list of dictionaries from _parse_pdf_with_coordinates.
+        api_key (str): The API key to use for this call.
+
+    Returns:
+        list or None: A list of dictionaries with translated text, or None on failure.
+    """
+    if not structured_content:
+        return []
+
+    logging.info(f"Sending {len(structured_content)} text blocks for layout-aware translation.")
+
+    # Configure the API for this specific call
+    genai.configure(api_key=api_key)
+
+    try:
+        json_input = json.dumps(structured_content, indent=2)
+
+        # The prompt is a combination of the system prompt and the data
+        prompt = config.LAYOUT_AWARE_TRANSLATE_PROMPT + "\n\n" + json_input
+
+        model = genai.GenerativeModel(model_name="gemini-2.5-pro")
+        response = model.generate_content(prompt, request_options={"timeout": 900})
+
+        # Clean the response from the model
+        raw_text = response.text.strip()
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[len("```json"):].strip()
+        if raw_text.endswith("```"):
+            raw_text = raw_text[:-len("```")].strip()
+
+        # Parse the JSON response
+        translated_content = json.loads(raw_text)
+        return translated_content
+
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to decode JSON response from API: {e}")
+        logging.debug(f"Raw response was: {raw_text}")
+        return None
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during translation API call: {e}")
+        # Re-raising is an option, but for now, we'll return None to signal failure
+        return None
 
 def process_task(task_info, api_key):
     """
@@ -82,76 +131,26 @@ def process_task(task_info, api_key):
     logging.info(f"{log_prefix} Parsing PDF for text and coordinates...")
     structured_content = _parse_pdf_with_coordinates(source_pdf_path)
     if not structured_content:
-        logging.warning(f"{log_prefix} PDF parsing yielded no text blocks. The PDF might be image-based or empty. Proceeding without structured data.")
-    else:
-        logging.info(f"{log_prefix} Successfully extracted {len(structured_content)} text blocks. First block: {structured_content[0]}")
+        logging.warning(f"{log_prefix} PDF parsing yielded no text blocks. The PDF might be image-based or empty. Task will be marked as successful.")
+        return True # Nothing to translate, so we consider it a success.
 
-    try:
-        # --- 2. Construct the prompt for the API call ---
-        prompt_parts = [config.ai_prompt]
-        prompt_parts.append(genai.upload_file(path=source_pdf_path))
+    # --- 2. Get layout-aware translation ---
+    translated_content = _get_translation_with_layout(structured_content, api_key)
 
-        # Append images if they exist
-        if source_folder_path.exists() and source_image_dir.exists():
-            image_files = sorted(list(source_image_dir.glob("*.jpg")))
-            if image_files:
-                image_list_prompt = "--- 可用图片文件列表 (必须使用) ---\n" + "\n".join([p.name for p in image_files]) + "\n--- 列表结束 ---\n"
-                prompt_parts.append(image_list_prompt)
-                for image_path in image_files:
-                    prompt_parts.append(genai.upload_file(path=image_path))
+    if translated_content is None:
+        logging.error(f"{log_prefix} Layout-aware translation failed.")
+        return False # Signal a controllable failure to the scheduler
 
-        # --- 3. Call the Generative AI Model ---
-        logging.info(f"{log_prefix} Calling Gemini API with model gemini-2.5-pro...")
-        model = genai.GenerativeModel(model_name="gemini-2.5-pro")
-        response = model.generate_content(prompt_parts, request_options={"timeout": 600})
+    # --- 3. Log results ---
+    logging.success(f"{log_prefix} Successfully received translated layout data.")
+    logging.info(f"{log_prefix} Translated {len(translated_content)} text blocks. First block: {translated_content[0] if translated_content else 'N/A'}")
 
-        # Clean up the response text
-        raw_text = response.text.strip()
-        if raw_text.startswith("```latex"):
-            raw_text = raw_text[len("```latex"):].strip()
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-len("```")].strip()
+    # For now, the task is complete after successful translation and logging.
+    # The LaTeX generation will be a separate step.
+    # We can save the translated content to a file for inspection.
+    translated_json_path = task_output_dir / "translated_layout.json"
+    with open(translated_json_path, 'w', encoding='utf-8') as f:
+        json.dump(translated_content, f, ensure_ascii=False, indent=2)
+    logging.info(f"{log_prefix} Translated data saved to {translated_json_path}")
 
-        final_latex_code = config.LATEX_PREAMBLE + "\n" + raw_text
-
-        # --- 4. Save LaTeX code and copy assets ---
-        output_tex_path = task_output_dir / "generated.tex"
-        with open(output_tex_path, "w", encoding="utf-8") as f:
-            f.write(final_latex_code)
-        logging.info(f"{log_prefix} LaTeX code saved to {output_tex_path}")
-
-        # Copy images directory to the output folder
-        if source_folder_path.exists() and source_image_dir.exists() and any(source_image_dir.iterdir()):
-            target_image_dir = task_output_dir / "images"
-            if target_image_dir.exists():
-                shutil.rmtree(target_image_dir)
-            shutil.copytree(source_image_dir, target_image_dir)
-
-        # --- 5. Compile LaTeX to PDF ---
-        logging.info(f"{log_prefix} Starting PDF rendering with XeLaTeX...")
-        for i in range(2): # Run twice for references
-            process = subprocess.run(
-                ["xelatex", "-interaction=nonstopmode", output_tex_path.name],
-                cwd=task_output_dir,
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='ignore'
-            )
-            if process.returncode != 0:
-                logging.warning(f"{log_prefix} XeLaTeX compilation failed on run {i+1}. Check log: {output_tex_path.with_suffix('.log')}")
-                return False # Controllable failure
-
-        # --- 6. Final Verification and Success Marking ---
-        if output_tex_path.with_suffix('.pdf').exists():
-            # The "ultimate success marker": copy the original PDF to the output dir
-            shutil.copy(source_pdf_path, task_output_dir)
-            logging.success(f"{log_prefix} Successfully generated PDF and copied success marker.")
-            return True
-        else:
-            logging.warning(f"{log_prefix} PDF file was not generated, even though XeLaTeX reported no errors.")
-            return False # Controllable failure
-
-    except Exception as e:
-        logging.error(f"{log_prefix} A critical error occurred: {e}")
-        raise # Re-raise the exception to be handled by the scheduler as a critical failure
+    return True

@@ -45,6 +45,32 @@ FAILURE_PENALTY_WEIGHT = 3
 
 # --- LaTeX & AI Prompt Configuration ---
 
+LAYOUT_AWARE_TRANSLATE_PROMPT = r"""
+You are an expert JSON document translator. Your sole mission is to translate the value of the "text" field for each object in a JSON array from Japanese to Chinese.
+
+**CRITICAL RULES:**
+1.  **DO NOT** alter the structure of the JSON.
+2.  **DO NOT** change, add, or remove any fields. The `page` and `coords` fields must be preserved exactly as they are.
+3.  Your output **MUST** be a valid JSON array.
+4.  Translate **ONLY** the content of the "text" field.
+
+Example Input:
+```json
+[
+  {"page": 0, "text": "これはテストです", "coords": [10, 20, 100, 50]},
+  {"page": 1, "text": "お願いします", "coords": [15, 25, 105, 55]}
+]
+```
+
+Example Output:
+```json
+[
+  {"page": 0, "text": "这是一个测试", "coords": [10, 20, 100, 50]},
+  {"page": 1, "text": "拜托了", "coords": [15, 25, 105, 55]}
+]
+```
+"""
+
 LATEX_PREAMBLE = r"""
 \documentclass{article}
 \usepackage{xeCJK}
