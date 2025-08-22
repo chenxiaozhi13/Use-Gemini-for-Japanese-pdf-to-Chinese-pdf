@@ -1,8 +1,0 @@
-pytest
-google-generativeai
-pdfminer.six
-reportlab
-fastapi
-uvicorn
-celery
-redis
