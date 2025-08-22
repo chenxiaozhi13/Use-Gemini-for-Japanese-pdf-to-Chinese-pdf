@@ -25,8 +25,8 @@ celery_app.conf.update(
 
 # --- Celery Task Definition ---
 
-@celery_app.task(name='tasks.process_pdf_task')
-def process_pdf_task(file_path: str):
+@celery_app.task(bind=True, name='tasks.process_pdf_task')
+def process_pdf_task(self, file_path: str):
     """
     A Celery task that orchestrates the processing of a single PDF file.
 
@@ -35,22 +35,29 @@ def process_pdf_task(file_path: str):
 
     Args:
         file_path (str): The absolute path to the PDF file to be processed.
-    """
-    # It's good practice to set up the logger within the task
-    # if the worker is running in a separate process.
-    logger.setup_logger()
 
-    logger.logging.info(f"Celery task received for file: {file_path}")
+    Returns:
+        str: The absolute path to the generated PDF on success, or a descriptive
+             error message string on failure.
+    """
+    logger.setup_logger()
+    logger.logging.info(f"Celery task {self.request.id} received for file: {file_path}")
 
     try:
         # Call the main orchestration logic from our scheduler module
-        # We pass the single file path in a list as the orchestrator
-        # is designed to handle a list of tasks.
-        scheduler.run_orchestration([file_path])
-        logger.logging.success(f"Orchestration completed for file: {file_path}")
-    except Exception as e:
-        logger.logging.error(f"An error occurred during orchestration for {file_path}: {e}")
-        # Depending on the desired retry policy, you could re-raise the exception
-        # raise self.retry(exc=e, countdown=60)
+        result_path = scheduler.run_orchestration([file_path])
 
-    return f"Processing complete for {file_path}"
+        if result_path:
+            logger.logging.success(f"Orchestration for {self.request.id} completed successfully. Result: {result_path}")
+            return result_path
+        else:
+            logger.logging.error(f"Orchestration for {self.request.id} failed with a controllable error.")
+            # This is a failure case we want to report to the user.
+            # We raise an exception, and Celery will store the exception message as the task's result.
+            raise Exception("PDF processing failed. Check worker logs for details.")
+
+    except Exception as e:
+        logger.logging.error(f"A critical exception occurred in task {self.request.id} for file {file_path}: {e}", exc_info=True)
+        # Re-raise the exception. Celery will catch it and store it as the task result.
+        # This makes the failure and its reason visible in the status check.
+        raise e

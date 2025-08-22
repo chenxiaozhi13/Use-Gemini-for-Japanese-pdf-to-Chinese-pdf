@@ -123,7 +123,7 @@ def _rebuild_pdf_from_layout(translated_layout, page_dimensions, output_path):
         output_path (Path): The path to save the newly generated PDF.
 
     Returns:
-        bool: True on success, False on failure.
+        Path or None: The path to the generated PDF on success, None on failure.
     """
     logging.info(f"Rebuilding PDF at {output_path}...")
 
@@ -140,7 +140,7 @@ def _rebuild_pdf_from_layout(translated_layout, page_dimensions, output_path):
     except Exception as e:
         logging.error(f"CRITICAL: Could not register CJK font from '{cjk_font_path}'. Error: {e}")
         logging.error("Cannot proceed without a CJK font. Please install a suitable font and update the path in `_rebuild_pdf_from_layout`.")
-        return False
+        return None
 
     # Group text blocks by page number for easier processing
     blocks_by_page = {}
@@ -170,10 +170,10 @@ def _rebuild_pdf_from_layout(translated_layout, page_dimensions, output_path):
 
         c.save()
         logging.success(f"Successfully rebuilt PDF: {output_path}")
-        return True
+        return output_path
     except Exception as e:
         logging.error(f"An error occurred during PDF reconstruction with reportlab: {e}")
-        return False
+        return None
 
 def process_task(source_pdf_path, api_key):
     """
@@ -187,7 +187,7 @@ def process_task(source_pdf_path, api_key):
         api_key (str): The Google AI API key to use for this task.
 
     Returns:
-        bool: True on success, False on a controllable failure.
+        str or None: The absolute path of the generated PDF on success, or None on failure.
 
     Raises:
         Exception: For critical, non-retriable errors (e.g., API failures).
@@ -209,30 +209,30 @@ def process_task(source_pdf_path, api_key):
     # If the source PDF doesn't exist, there's nothing to process.
     if not source_pdf_path.exists():
         logging.warning(f"{log_prefix} Source PDF not found at {source_pdf_path}. Skipping task.")
-        return True # Consider it "successful" as there is no work to be done.
+        return None
 
     # --- 1. Parse PDF for text and coordinates ---
     logging.info(f"{log_prefix} Parsing PDF for text and coordinates...")
     structured_content, page_dimensions = _parse_pdf_with_coordinates(source_pdf_path)
     if not structured_content:
-        logging.warning(f"{log_prefix} PDF parsing yielded no text blocks. The PDF might be image-based or empty. Task will be marked as successful.")
-        return True # Nothing to translate, so we consider it a success.
+        logging.warning(f"{log_prefix} PDF parsing yielded no text blocks. The PDF might be image-based or empty.")
+        return None
 
     # --- 2. Get layout-aware translation ---
     translated_content = _get_translation_with_layout(structured_content, api_key)
 
     if translated_content is None:
         logging.error(f"{log_prefix} Layout-aware translation failed.")
-        return False # Signal a controllable failure to the scheduler
+        return None
 
     # --- 3. Rebuild PDF from translated layout ---
     output_pdf_path = task_output_dir / f"{task_id}_translated.pdf"
 
-    rebuild_success = _rebuild_pdf_from_layout(
+    output_file_path = _rebuild_pdf_from_layout(
         translated_layout=translated_content,
         page_dimensions=page_dimensions,
         output_path=output_pdf_path
     )
 
-    # The success of the entire task now depends on the PDF reconstruction
-    return rebuild_success
+    # Return the absolute path on success, or None on failure
+    return str(output_file_path.resolve()) if output_file_path else None

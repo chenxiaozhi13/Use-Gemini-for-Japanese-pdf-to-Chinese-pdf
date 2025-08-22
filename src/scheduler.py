@@ -45,16 +45,25 @@ def _process_wrapper(file_path, api_key, results_queue):
     is caught and put into the shared results queue.
     """
     try:
-        success = worker.process_task(file_path, api_key)
-        # 'success' can be True or False (for controllable failures)
-        results_queue.put({'task': file_path, 'key': api_key, 'status': success})
+        # The result is now the output file path (str) or None on failure
+        result_path = worker.process_task(file_path, api_key)
+        results_queue.put({'task': file_path, 'key': api_key, 'status': result_path})
     except Exception as e:
         # A critical, unexpected error occurred in the worker
-        results_queue.put({'task': file_path, 'key': api_key, 'status': 'CRITICAL_FAILURE', 'error': str(e)})
+        logging.error(f"Critical exception in process wrapper for {file_path}: {e}", exc_info=True)
+        results_queue.put({'task': file_path, 'key': api_key, 'status': None})
 
 def run_orchestration(tasks_to_process: list[str]):
     """
     The main orchestration loop to manage and distribute file-based tasks to worker processes.
+
+    Args:
+        tasks_to_process (list[str]): A list of absolute file paths to process.
+
+    Returns:
+        The result of the first task in the list. For the Celery integration, this
+        list will only ever contain one item. The return value will be the output
+        file path on success, or an error object/None on failure.
     """
     logging.info(f"Orchestrator starting with {len(tasks_to_process)} tasks to process.")
 
@@ -70,6 +79,7 @@ def run_orchestration(tasks_to_process: list[str]):
     failed_tasks = []
 
     # --- Main Loop ---
+    task_result = None
     # Continue as long as there are tasks to start or processes still running
     while tasks_queue or active_processes:
 
@@ -77,12 +87,16 @@ def run_orchestration(tasks_to_process: list[str]):
         while not results_queue.empty():
             result = results_queue.get()
             key = result['key']
-            task_info = result['task']
+            task_path = result['task']
+
+            # Store the result for the task. Since we only process one at a time
+            # from Celery, this will be the final result we need to return.
+            task_result = result['status']
 
             # Find and remove the finished process from our tracking list
             finished_process = None
             for p_info in active_processes:
-                if p_info['task'] == task_info and p_info['key'] == key:
+                if p_info['task'] == task_path and p_info['key'] == key:
                     finished_process = p_info
                     break
             if finished_process:
@@ -93,17 +107,13 @@ def run_orchestration(tasks_to_process: list[str]):
             api_key_status[key]['active'] -= 1
 
             # Log outcome and update failure counts
-            if result['status'] == True:
-                logging.success(f"Task {result['task']} completed successfully.")
-                successful_tasks.append(result['task'])
-            elif result['status'] == False:
-                logging.warning(f"Task {result['task']} failed with a controllable error.")
+            if task_result: # Success if we have a file path
+                logging.success(f"Task {task_path} completed successfully. Output: {task_result}")
+                successful_tasks.append(task_path)
+            else: # Failure if result is None
+                logging.warning(f"Task {task_path} failed with a controllable error.")
                 api_key_status[key]['failures'] += 1
-                failed_tasks.append(result['task'])
-            else: # CRITICAL_FAILURE
-                logging.error(f"Task {result['task']} failed with a critical error: {result['error']}")
-                api_key_status[key]['failures'] += 1 # Penalize heavily
-                failed_tasks.append(result['task'])
+                failed_tasks.append(task_path)
 
         # --- 2. Launch new workers if there are free slots ---
         can_launch = len(active_processes) < config.TARGET_TOTAL_CONCURRENCY and tasks_queue
@@ -136,7 +146,7 @@ def run_orchestration(tasks_to_process: list[str]):
         time.sleep(0.1)
 
     # --- Shutdown ---
-    logging.info("All tasks have been processed. Scheduler shutting down.")
+    logging.info("All tasks have been processed. Orchestrator shutting down.")
     logging.info("-" * 50)
     logging.success(f"Total successful tasks: {len(successful_tasks)}")
     logging.error(f"Total failed tasks: {len(failed_tasks)}")
@@ -145,3 +155,5 @@ def run_orchestration(tasks_to_process: list[str]):
         for task_path in failed_tasks:
             logging.info(f"  - {task_path}")
     logging.info("-" * 50)
+
+    return task_result

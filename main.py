@@ -3,7 +3,9 @@ import shutil
 import logging
 from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from tasks import process_pdf_task
+from fastapi.responses import FileResponse
+from celery.result import AsyncResult
+from tasks import celery_app, process_pdf_task
 
 # --- App Initialization ---
 app = FastAPI(
@@ -78,6 +80,62 @@ async def upload_pdf(file: UploadFile = File(...)):
         "status": "queued",
         "detail": "The file has been successfully queued for processing.",
     }
+
+@app.get("/status/{task_id}")
+async def get_task_status(task_id: str):
+    """
+    Checks the status of a background processing task.
+    """
+    task_result = AsyncResult(task_id, app=celery_app)
+
+    response = {
+        "task_id": task_id,
+        "status": task_result.state,
+        "result": None,
+    }
+
+    if task_result.state == "SUCCESS":
+        response["result"] = task_result.result
+    elif task_result.state == "FAILURE":
+        # The result of a failed task is the exception that was raised.
+        response["result"] = str(task_result.result)
+
+    return response
+
+
+@app.get("/download/{task_id}")
+async def download_result(task_id: str):
+    """
+    Downloads the processed PDF file if the task was successful.
+    """
+    task_result = AsyncResult(task_id, app=celery_app)
+
+    if task_result.state != "SUCCESS":
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task {task_id} is not complete or has failed. Current status: {task_result.state}"
+        )
+
+    file_path_str = task_result.result
+    if not file_path_str or not isinstance(file_path_str, str):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task {task_id} completed but did not return a valid file path."
+        )
+
+    file_path = Path(file_path_str)
+    if not file_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"File not found for task {task_id}. The file may have been moved or deleted."
+        )
+
+    return FileResponse(
+        path=file_path,
+        filename=file_path.name,
+        media_type='application/pdf'
+    )
+
 
 # To run this application:
 # 1. Make sure you have installed the dependencies: pip install -r requirements.txt
